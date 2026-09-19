@@ -106,7 +106,7 @@ export async function getMonthlyUsage(userId: string): Promise<{ used: number; r
 //
 // Set to the date you actually enable billing in production, e.g.:
 //   export const BILLING_CUTOFF_DATE = new Date('2026-07-15T00:00:00Z');
-export const BILLING_CUTOFF_DATE = new Date('TODO_SET_ON_DEPLOY');
+export const BILLING_CUTOFF_DATE = new Date('2026-09-19T00:00:00Z');
 
 if (typeof process !== 'undefined') {
   const ts = BILLING_CUTOFF_DATE.getTime();
