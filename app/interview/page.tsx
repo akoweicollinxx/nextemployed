@@ -8,14 +8,7 @@ import vapi from '@/lib/vapi';
 import { track } from '@/lib/track';
 import type { InterviewLimitResponse } from '@/app/api/interview/check-limit/route';
 
-// TODO: Drop final portrait at /public/interviewers/sarah-chen.jpg
-// Recommended specs: 512×512px, neutral expression, head-and-shoulders,
-// professional lighting, transparent or solid neutral (#0a0a0a) background.
-// Generation prompt (Midjourney / Flux / DALL-E):
-//   "Professional headshot portrait of a woman in her mid-30s, Asian descent,
-//    confident friendly expression, business casual attire, soft studio lighting,
-//    neutral dark background, photorealistic, 512x512"
-const PORTRAIT_SRC = '/interviewers/sarah-chen.jpg';
+const PORTRAIT_SRC = '/interviewers/sarah_chen.jpg';
 const JD_CONTEXT_KEY = 'nextemployed_jd_context';
 
 type JdContext = { role: string | null; company: string | null };
@@ -833,7 +826,7 @@ export default function InterviewPage() {
                 onClick={handleUpgradeFromWall}
                 className="inline-flex items-center justify-center px-6 py-3 rounded-full bg-gradient-to-r from-purple-600 to-cyan-600 text-white font-semibold text-sm hover:shadow-[0_0_30px_rgba(147,51,234,0.3)] hover:scale-105 active:scale-95 transition-all"
               >
-                Upgrade to Pro — $9.99/month
+                Upgrade to Pro — $4.99/month
               </button>
               <button
                 onClick={() => router.push('/')}

@@ -180,7 +180,7 @@ export default function PricingPage() {
                   </span>
                 </div>
                 <div className="flex items-end gap-1.5 mb-1">
-                  <span className="text-5xl font-bold bg-gradient-to-r from-purple-300 to-cyan-300 bg-clip-text text-transparent">$9.99</span>
+                  <span className="text-5xl font-bold bg-gradient-to-r from-purple-300 to-cyan-300 bg-clip-text text-transparent">$4.99</span>
                   <span className="text-gray-500 mb-2">/month</span>
                 </div>
                 <p className="text-xs text-gray-600 mt-1">Cancel anytime</p>

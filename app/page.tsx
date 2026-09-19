@@ -83,8 +83,7 @@ export default function LandingPage() {
   const [isClient, setIsClient] = useState(false);
   const [particles, setParticles] = useState<Particle[]>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const videoPlaceholderRef = useRef<HTMLDivElement>(null);
-  const videoTrackedRef = useRef(false);
+const videoTrackedRef = useRef(false);
 
   // Section inView refs
   const [demoRef, demoInView] = useInView();
@@ -131,7 +130,7 @@ export default function LandingPage() {
   // Video viewport tracking
   useEffect(() => {
     if (!isClient) return;
-    const el = videoRef.current ?? videoPlaceholderRef.current;
+    const el = videoRef.current;
     if (!el) return;
     const obs = new IntersectionObserver(
       ([entry]) => {
@@ -157,7 +156,6 @@ export default function LandingPage() {
     );
   }
 
-  const demoVideoUrl = process.env.NEXT_PUBLIC_DEMO_VIDEO_URL;
   const showStats = process.env.NEXT_PUBLIC_SHOW_STATS === "true";
   const showTestimonials =
     process.env.NEXT_PUBLIC_SHOW_TESTIMONIALS === "true" && TESTIMONIALS.length > 0;
@@ -257,27 +255,16 @@ export default function LandingPage() {
             </p>
           </div>
 
-          {demoVideoUrl ? (
-            <video
-              ref={videoRef}
-              autoPlay
-              muted
-              loop
-              playsInline
-              preload="metadata"
-              src={demoVideoUrl}
-              className="w-full rounded-3xl border border-white/10 shadow-2xl"
-            />
-          ) : (
-            <div
-              ref={videoPlaceholderRef}
-              className="w-full aspect-video rounded-3xl border border-white/10 bg-white/[0.02] flex items-center justify-center"
-            >
-              <p className="text-gray-600 text-sm text-center px-6">
-                Demo video coming soon — drop the file at /public/video/demo.mp4 and set NEXT_PUBLIC_DEMO_VIDEO_URL
-              </p>
-            </div>
-          )}
+          <video
+            ref={videoRef}
+            autoPlay
+            muted
+            loop
+            playsInline
+            preload="metadata"
+            src="/video/demo.mp4"
+            className="w-full rounded-3xl border border-white/10 shadow-2xl"
+          />
 
           <div className="text-center mt-10">
             <Link
