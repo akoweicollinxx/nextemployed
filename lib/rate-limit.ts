@@ -4,108 +4,87 @@
 // For OSS quarterly filing, download tax reports from Stripe Tax → Reports.
 // If Stripe Tax is ever disabled, VAT compliance becomes manual — do not disable without a plan.
 
-// TODO: swap this in-memory store for Upstash Redis before production
-// (in-memory resets on every cold start and is not shared across serverless instances)
+import { redis } from '@/lib/redis';
 
-type Entry = { count: number; resetAt: number };
+// ─── IP daily limit ───────────────────────────────────────────────────────────
 
-const WINDOW_MS = 24 * 60 * 60 * 1000;
-const MAX_STORE_SIZE = 5000;
-
-function checkLimit(store: Map<string, Entry>, key: string, limit: number): { allowed: boolean; remaining: number } {
-  const now = Date.now();
-
-  if (store.size > MAX_STORE_SIZE) {
-    for (const [k, entry] of store) {
-      if (now > entry.resetAt) store.delete(k);
-    }
-  }
-
-  if (store.size > MAX_STORE_SIZE) {
-    for (const [k] of store) {
-      store.delete(k);
-      if (store.size <= MAX_STORE_SIZE) break;
-    }
-  }
-
-  const entry = store.get(key);
-
-  if (!entry || now > entry.resetAt) {
-    store.set(key, { count: 1, resetAt: now + WINDOW_MS });
-    return { allowed: true, remaining: limit - 1 };
-  }
-
-  if (entry.count >= limit) {
-    return { allowed: false, remaining: 0 };
-  }
-
-  entry.count++;
-  return { allowed: true, remaining: limit - entry.count };
-}
-
-const ipStore = new Map<string, Entry>();
 const IP_LIMIT = 3;
 
-export function checkRateLimit(ip: string): { allowed: boolean; remaining: number } {
-  return checkLimit(ipStore, ip, IP_LIMIT);
+export async function checkRateLimit(ip: string): Promise<{ allowed: boolean; remaining: number }> {
+  const key = `rl:ip:${ip}`;
+  try {
+    const count = await redis.incr(key);
+    if (count === 1) await redis.expire(key, 24 * 60 * 60);
+    return { allowed: count <= IP_LIMIT, remaining: Math.max(0, IP_LIMIT - count) };
+  } catch (err) {
+    console.error('[rate-limit] Redis error in checkRateLimit:', err);
+    return { allowed: false, remaining: 0 };
+  }
 }
+
+// ─── User daily limit ─────────────────────────────────────────────────────────
 
 // Tune based on usage data
 const USER_DAILY_LIMIT = 5;
-const userStore = new Map<string, Entry>();
 
-export function checkUserRateLimit(userId: string): { allowed: boolean; remaining: number } {
-  return checkLimit(userStore, userId, USER_DAILY_LIMIT);
+export async function checkUserRateLimit(userId: string): Promise<{ allowed: boolean; remaining: number }> {
+  const key = `rl:ud:${userId}`;
+  try {
+    const count = await redis.incr(key);
+    if (count === 1) await redis.expire(key, 24 * 60 * 60);
+    return { allowed: count <= USER_DAILY_LIMIT, remaining: Math.max(0, USER_DAILY_LIMIT - count) };
+  } catch (err) {
+    console.error('[rate-limit] Redis error in checkUserRateLimit:', err);
+    return { allowed: false, remaining: 0 };
+  }
 }
+
+// ─── User monthly tailored CV limit ──────────────────────────────────────────
 
 // Free tier limit. When monetising, gate above this behind Stripe.
 // Do not remove this limit silently — users on the free tier should still get 3.
 export const TAILORED_CV_MONTHLY_LIMIT = 3;
-const monthlyUserStore = new Map<string, Entry>();
 
-function getMonthResetAt(): number {
+function currentMonthKey(): string {
   const d = new Date();
-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
-export function checkMonthlyUserRateLimit(userId: string): {
+function getMonthResetDate(): string {
+  const d = new Date();
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString().split('T')[0];
+}
+
+export async function checkMonthlyUserRateLimit(userId: string): Promise<{
   allowed: boolean;
   remaining: number;
   resetDate: string;
-} {
-  const now = Date.now();
-  const resetAt = getMonthResetAt();
-  const resetDate = new Date(resetAt).toISOString().split('T')[0];
-
-  if (monthlyUserStore.size > 5000) {
-    for (const [k, entry] of monthlyUserStore) {
-      if (now > entry.resetAt) monthlyUserStore.delete(k);
-    }
-  }
-
-  const entry = monthlyUserStore.get(userId);
-
-  if (!entry || now > entry.resetAt) {
-    monthlyUserStore.set(userId, { count: 1, resetAt });
-    return { allowed: true, remaining: TAILORED_CV_MONTHLY_LIMIT - 1, resetDate };
-  }
-
-  if (entry.count >= TAILORED_CV_MONTHLY_LIMIT) {
+}> {
+  const key = `rl:um:${userId}:${currentMonthKey()}`;
+  const resetDate = getMonthResetDate();
+  try {
+    const count = await redis.incr(key);
+    // 40-day TTL: key is unused next calendar month and self-destructs well after reset
+    if (count === 1) await redis.expire(key, 40 * 24 * 60 * 60);
+    const allowed = count <= TAILORED_CV_MONTHLY_LIMIT;
+    return { allowed, remaining: Math.max(0, TAILORED_CV_MONTHLY_LIMIT - count), resetDate };
+  } catch (err) {
+    console.error('[rate-limit] Redis error in checkMonthlyUserRateLimit:', err);
     return { allowed: false, remaining: 0, resetDate };
   }
-
-  entry.count++;
-  return { allowed: true, remaining: TAILORED_CV_MONTHLY_LIMIT - entry.count, resetDate };
 }
 
-export function getMonthlyUsage(userId: string): { used: number; remaining: number; resetDate: string } {
-  const now = Date.now();
-  const resetDate = new Date(getMonthResetAt()).toISOString().split('T')[0];
-  const entry = monthlyUserStore.get(userId);
-  if (!entry || now > entry.resetAt) {
+export async function getMonthlyUsage(userId: string): Promise<{ used: number; remaining: number; resetDate: string }> {
+  const key = `rl:um:${userId}:${currentMonthKey()}`;
+  const resetDate = getMonthResetDate();
+  try {
+    const count = await redis.get<number>(key);
+    const used = count ?? 0;
+    return { used, remaining: Math.max(0, TAILORED_CV_MONTHLY_LIMIT - used), resetDate };
+  } catch (err) {
+    console.error('[rate-limit] Redis error in getMonthlyUsage:', err);
     return { used: 0, remaining: TAILORED_CV_MONTHLY_LIMIT, resetDate };
   }
-  return { used: entry.count, remaining: TAILORED_CV_MONTHLY_LIMIT - entry.count, resetDate };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -144,53 +123,89 @@ if (typeof process !== 'undefined') {
   }
 }
 
-const INTERVIEW_FREE_WEEKLY_LIMIT = 1;
-const weeklyInterviewStore = new Map<string, Entry>();
+export const INTERVIEW_FREE_WEEKLY_LIMIT = 1;
 
-function getWeekResetAt(): number {
+const RESERVATION_TTL_S = 2 * 60; // 2 minutes
+
+function currentWeekKey(): string {
   const now = new Date();
-  // ISO week starts Monday. getUTCDay(): 0=Sun,1=Mon,...,6=Sat
   const daysFromMonday = (now.getUTCDay() + 6) % 7;
-  const weekStart = Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate() - daysFromMonday,
-  );
-  return weekStart + 7 * 24 * 60 * 60 * 1000; // next Monday 00:00:00 UTC
+  const mon = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysFromMonday));
+  return `${mon.getUTCFullYear()}-${String(mon.getUTCMonth() + 1).padStart(2, '0')}-${String(mon.getUTCDate()).padStart(2, '0')}`;
 }
 
-// Records one interview attempt and returns whether it was within the free limit.
-// Call this BEFORE vapi.start() — if vapi fails afterward the slot is still consumed.
-export function checkAndRecordWeeklyInterview(userId: string): { allowed: boolean; remaining: number } {
-  const now = Date.now();
-  const resetAt = getWeekResetAt();
+function getWeekResetDate(): string {
+  const now = new Date();
+  const daysFromMonday = (now.getUTCDay() + 6) % 7;
+  const mon = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysFromMonday));
+  return new Date(mon.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+}
 
-  if (weeklyInterviewStore.size > MAX_STORE_SIZE) {
-    for (const [k, entry] of weeklyInterviewStore) {
-      if (now > entry.resetAt) weeklyInterviewStore.delete(k);
+// Reserves one weekly interview slot for a short window.
+// Use this in preflight checks; confirm or release later.
+// Uses SET NX to atomically prevent two concurrent starts from both getting allowed.
+export async function checkAndRecordWeeklyInterview(userId: string): Promise<{ allowed: boolean; remaining: number }> {
+  const countKey = `rl:iw:${userId}:${currentWeekKey()}`;
+  const reservationKey = `rl:ir:${userId}`;
+  try {
+    const [countRaw, setResult] = await Promise.all([
+      redis.get<number>(countKey),
+      redis.set(reservationKey, '1', { nx: true, ex: RESERVATION_TTL_S }),
+    ]);
+    const used = countRaw ?? 0;
+
+    if (used >= INTERVIEW_FREE_WEEKLY_LIMIT) {
+      // Limit already consumed — clean up any reservation we may have just created
+      if (setResult !== null) await redis.del(reservationKey);
+      return { allowed: false, remaining: 0 };
     }
-  }
 
-  const entry = weeklyInterviewStore.get(userId);
+    if (setResult === null) {
+      // SET NX failed: another reservation is in-flight for this user
+      return { allowed: false, remaining: 0 };
+    }
 
-  if (!entry || now > entry.resetAt) {
-    weeklyInterviewStore.set(userId, { count: 1, resetAt });
-    return { allowed: true, remaining: INTERVIEW_FREE_WEEKLY_LIMIT - 1 };
-  }
-
-  if (entry.count >= INTERVIEW_FREE_WEEKLY_LIMIT) {
+    return { allowed: true, remaining: Math.max(0, INTERVIEW_FREE_WEEKLY_LIMIT - used - 1) };
+  } catch (err) {
+    console.error('[rate-limit] Redis error in checkAndRecordWeeklyInterview:', err);
     return { allowed: false, remaining: 0 };
   }
+}
 
-  entry.count++;
-  return { allowed: true, remaining: INTERVIEW_FREE_WEEKLY_LIMIT - entry.count };
+// Confirms a previously reserved slot. Returns false when no valid reservation exists.
+export async function recordWeeklyInterviewUsed(userId: string): Promise<boolean> {
+  const reservationKey = `rl:ir:${userId}`;
+  const countKey = `rl:iw:${userId}:${currentWeekKey()}`;
+  try {
+    const deleted = await redis.del(reservationKey);
+    if (deleted === 0) return false; // reservation expired or was never created
+
+    const count = await redis.incr(countKey);
+    if (count === 1) await redis.expire(countKey, 8 * 24 * 60 * 60); // 8 days
+    return true;
+  } catch (err) {
+    console.error('[rate-limit] Redis error in recordWeeklyInterviewUsed:', err);
+    return false;
+  }
+}
+
+export async function releaseWeeklyInterviewReservation(userId: string): Promise<void> {
+  try {
+    await redis.del(`rl:ir:${userId}`);
+  } catch (err) {
+    console.error('[rate-limit] Redis error in releaseWeeklyInterviewReservation:', err);
+  }
 }
 
 // Peek at usage without consuming a slot (used for UI state, not enforcement).
-export function peekWeeklyInterviewUsage(userId: string): { used: number; resetDate: string } {
-  const now = Date.now();
-  const entry = weeklyInterviewStore.get(userId);
-  const resetDate = new Date(getWeekResetAt()).toISOString().split('T')[0];
-  if (!entry || now > entry.resetAt) return { used: 0, resetDate };
-  return { used: entry.count, resetDate };
+export async function peekWeeklyInterviewUsage(userId: string): Promise<{ used: number; resetDate: string }> {
+  const countKey = `rl:iw:${userId}:${currentWeekKey()}`;
+  const resetDate = getWeekResetDate();
+  try {
+    const count = await redis.get<number>(countKey);
+    return { used: count ?? 0, resetDate };
+  } catch (err) {
+    console.error('[rate-limit] Redis error in peekWeeklyInterviewUsage:', err);
+    return { used: 0, resetDate };
+  }
 }

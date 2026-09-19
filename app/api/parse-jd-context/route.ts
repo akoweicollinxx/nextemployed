@@ -3,18 +3,21 @@ import { openai } from '@ai-sdk/openai';
 import { auth } from '@clerk/nextjs/server';
 import { NextResponse } from 'next/server';
 import { checkUserRateLimit } from '@/lib/rate-limit';
+import { PRO_PLAN_SLUG } from '@/lib/plans';
 
 export const runtime = 'nodejs';
 
 export async function POST(req: Request) {
-  const { userId } = await auth();
+  const { userId, has } = await auth();
   if (!userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const { allowed } = checkUserRateLimit(userId);
-  if (!allowed) {
-    return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
+  if (!has({ plan: PRO_PLAN_SLUG })) {
+    const { allowed } = await checkUserRateLimit(userId);
+    if (!allowed) {
+      return NextResponse.json({ error: 'rate_limit' }, { status: 429 });
+    }
   }
 
   let jdText: string;

@@ -6,7 +6,9 @@
       "Bash(npx tsc *)",
       "Bash(git checkout -- components/AuthSync.tsx)",
       "Bash(rm \"components/AuthSync.tsx\")",
-      "Bash(node -e \"const c = require\\('c:/Users/akowe/my-prep-app/node_modules/@clerk/nextjs'\\); const keys = Object.keys\\(c\\).filter\\(k => /pric|plan|billing|has|checkout|subscription/i.test\\(k\\)\\); console.log\\(JSON.stringify\\(keys, null, 2\\)\\);\")"
+      "Bash(node -e \"const c = require\\('c:/Users/akowe/my-prep-app/node_modules/@clerk/nextjs'\\); const keys = Object.keys\\(c\\).filter\\(k => /pric|plan|billing|has|checkout|subscription/i.test\\(k\\)\\); console.log\\(JSON.stringify\\(keys, null, 2\\)\\);\")",
+      "Bash(xargs grep -l \"CheckoutButton\")",
+      "Bash(node -e \"const c = require\\('@clerk/nextjs/server'\\); console.log\\(Object.keys\\(c\\)\\)\")"
     ]
   }
 }

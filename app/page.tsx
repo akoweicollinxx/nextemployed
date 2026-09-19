@@ -412,7 +412,7 @@ export default function LandingPage() {
       {/* ── Footer ─────────────────────────────────────────────────────── */}
       <footer className="relative z-10 border-t border-white/5 py-12 px-6">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-6">
-          <p className="text-gray-500 text-sm">© 2026 cealadigital. All rights reserved.</p>
+          <p className="text-gray-500 text-sm">© 2026 nextemployed. All rights reserved.</p>
           <div className="flex gap-8 text-sm text-gray-500">
             <Link href="/privacy" className="hover:text-white transition-colors">Privacy</Link>
             <Link href="/terms" className="hover:text-white transition-colors">Terms</Link>

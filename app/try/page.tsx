@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { track } from '@/lib/track';
-import { SUBMISSION_KEY } from '@/lib/submission-key';
 
 const LOADING_MESSAGES = [
   'Reading the job description...',
@@ -141,21 +140,20 @@ export default function TryPage() {
       // Stream interrupted — show what arrived so far
     }
 
-    // Persist submission to sessionStorage so /try/results can access it post-signup
-    try {
-      sessionStorage.setItem(
-        SUBMISSION_KEY,
-        JSON.stringify({
-          cvText: resolvedCvText,
-          jobDescription: storedJobDescription,
-          teaserResult: streamedResult,
-          submittedAt: Date.now(),
-        })
-      );
-      track('try_submission_persisted');
-    } catch {
-      // sessionStorage not available (private browsing, storage full) — silently ignore
-    }
+    // Store the submission server-side via Redis + httpOnly cookie so it survives
+    // Clerk's sign-up flow (Clerk wipes localStorage on mount during signup).
+    fetch('/api/try/persist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        cvText: resolvedCvText,
+        jobDescription: storedJobDescription,
+        teaserResult: streamedResult,
+        submittedAt: Date.now(),
+      }),
+    })
+      .then(r => { if (r.ok) track('try_submission_persisted'); })
+      .catch(() => {});
 
     setStatus('done');
     track('try_submission_completed', { duration_ms: Date.now() - startTimeRef.current });

@@ -2,23 +2,26 @@ import { auth } from '@clerk/nextjs/server';
 import { NextResponse } from 'next/server';
 import { extractTextFromPDF } from '@/lib/pdf-utils';
 import { checkUserRateLimit } from '@/lib/rate-limit';
+import { PRO_PLAN_SLUG } from '@/lib/plans';
 
 export const runtime = 'nodejs';
 
 const MAX_CV_FILE_BYTES = 5 * 1024 * 1024; // 5MB
 
 export async function POST(req: Request) {
-  const { userId } = await auth();
+  const { userId, has } = await auth();
   if (!userId) {
     return NextResponse.json({ error: 'Authentication required.' }, { status: 401 });
   }
 
-  const { allowed } = checkUserRateLimit(userId);
-  if (!allowed) {
-    return NextResponse.json(
-      { error: 'You have reached your daily limit. Try again tomorrow.' },
-      { status: 429 }
-    );
+  if (!has({ plan: PRO_PLAN_SLUG })) {
+    const { allowed } = await checkUserRateLimit(userId);
+    if (!allowed) {
+      return NextResponse.json(
+        { error: 'You have reached your daily limit. Try again tomorrow.' },
+        { status: 429 }
+      );
+    }
   }
 
   const contentType = req.headers.get('content-type') ?? '';
@@ -53,9 +56,15 @@ export async function POST(req: Request) {
   if (name.endsWith('.pdf')) {
     try {
       cvText = await extractTextFromPDF(buffer);
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      const isScanned = msg.includes('scanned image');
       return NextResponse.json(
-        { error: 'Could not read your PDF. Try pasting your CV text instead.' },
+        {
+          error: isScanned
+            ? 'Your PDF appears to be a scanned image. Please paste your CV text or upload a text-based PDF (exported from Word, Google Docs, or similar).'
+            : 'Could not read your PDF. Try pasting your CV text instead, or upload a different PDF file.',
+        },
         { status: 400 }
       );
     }

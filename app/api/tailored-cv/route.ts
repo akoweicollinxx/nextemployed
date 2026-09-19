@@ -6,6 +6,7 @@ import {
   checkMonthlyUserRateLimit,
   TAILORED_CV_MONTHLY_LIMIT,
 } from '@/lib/rate-limit';
+import { PRO_PLAN_SLUG } from '@/lib/plans';
 import { track } from '@/lib/track';
 
 export const runtime = 'nodejs';
@@ -74,19 +75,22 @@ Return ONLY valid JSON with this exact shape — no markdown, no code fences, no
 If the CV is too sparse to tailor (under 200 words or no real experience), return { "error": "cv_too_sparse" } instead.`;
 
 export async function POST(req: Request) {
-  const { userId } = await auth();
+  const { userId, has } = await auth();
   if (!userId) {
     return NextResponse.json({ error: 'Authentication required.' }, { status: 401 });
   }
 
-  const { allowed, remaining, resetDate } = checkMonthlyUserRateLimit(userId);
-  if (!allowed) {
+  // Pro users bypass the monthly limit. Free users get 3/month.
+  const rateCheck = has({ plan: PRO_PLAN_SLUG }) ? null : await checkMonthlyUserRateLimit(userId);
+  if (rateCheck && !rateCheck.allowed) {
     track('tailored_cv_limit_hit', { userId });
     return NextResponse.json(
-      { error: 'monthly_limit_reached', limit: TAILORED_CV_MONTHLY_LIMIT, resetDate },
+      { error: 'monthly_limit_reached', limit: TAILORED_CV_MONTHLY_LIMIT, resetDate: rateCheck.resetDate },
       { status: 429 }
     );
   }
+  const remaining = rateCheck?.remaining ?? null;
+  const resetDate = rateCheck?.resetDate ?? null;
 
   let body: { cvText?: string; jdText?: string };
   try {

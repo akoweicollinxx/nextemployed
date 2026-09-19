@@ -8,7 +8,6 @@ import { AnalysisForm } from '@/components/analysis/AnalysisForm';
 import { AnalysisResult } from '@/components/analysis/AnalysisResult';
 import { LoadingState } from '@/components/analysis/LoadingState';
 import { track } from '@/lib/track';
-import { SUBMISSION_KEY } from '@/lib/submission-key';
 
 type Status = 'idle' | 'streaming' | 'done' | 'error' | 'rate-limited';
 
@@ -76,16 +75,12 @@ export default function CVAnalyserPage() {
       // Stream interrupted — show what arrived
     }
 
-    try {
-      sessionStorage.setItem(SUBMISSION_KEY, JSON.stringify({
-        cvText,
-        jobDescription,
-        teaserResult: '',
-        submittedAt: Date.now(),
-      }));
-    } catch {
-      // sessionStorage unavailable
-    }
+    // Store server-side so /try/tailored-cv can read it via the cookie.
+    fetch('/api/try/persist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cvText, jobDescription, teaserResult: '', submittedAt: Date.now() }),
+    }).catch(() => {});
 
     setStatus('done');
   };

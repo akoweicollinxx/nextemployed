@@ -2,6 +2,7 @@ import { auth } from '@clerk/nextjs/server';
 import { clerkClient } from '@clerk/nextjs/server';
 import { NextResponse } from 'next/server';
 import { checkAndRecordWeeklyInterview, BILLING_CUTOFF_DATE } from '@/lib/rate-limit';
+import { PRO_PLAN_SLUG } from '@/lib/plans';
 import { track } from '@/lib/track';
 
 export const runtime = 'nodejs';
@@ -17,13 +18,28 @@ export async function POST(): Promise<NextResponse<InterviewLimitResponse | { er
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const planId = process.env.NEXT_PUBLIC_CLERK_PRO_PLAN_ID;
-
   // 1. Pro subscription check
-  if (planId) {
-    const isPro = has({ plan: `user:${planId}` as `user:${string}` });
+  // has() reads the JWT pla claim ("u:pro_plan") and strips the "u:" prefix internally.
+  // Pass the slug directly — see lib/plans.ts for the ID vs slug distinction.
+  {
+    const isPro = has({ plan: PRO_PLAN_SLUG });
     if (isPro) {
       return NextResponse.json({ allowed: true, tier: 'pro' });
+    }
+
+    // Grace-period fallback: Clerk's JWT can take a few seconds to carry the new
+    // billing claim after checkout. The verified subscription webhook stamps
+    // publicMetadata.proGrantedAt; trust it for 5 minutes.
+    try {
+      const client = await clerkClient();
+      const dbUser = await client.users.getUser(userId);
+      const proGrantedAt = (dbUser.publicMetadata as Record<string, unknown>)?.proGrantedAt as number | undefined;
+      const GRACE_MS = 5 * 60 * 1000;
+      if (typeof proGrantedAt === 'number' && Date.now() - proGrantedAt < GRACE_MS) {
+        return NextResponse.json({ allowed: true, tier: 'pro' });
+      }
+    } catch {
+      // Clerk API unavailable — fall through to free-tier check
     }
   }
 
@@ -41,8 +57,9 @@ export async function POST(): Promise<NextResponse<InterviewLimitResponse | { er
     }
   }
 
-  // 3. Free tier — weekly cap. Slot is consumed here; if vapi fails the slot is still spent.
-  const { allowed } = checkAndRecordWeeklyInterview(userId);
+  // 3. Free tier — reserve a slot now so concurrent starts cannot overrun limits.
+  const reservation = await checkAndRecordWeeklyInterview(userId);
+  const allowed = reservation.allowed;
 
   if (!allowed) {
     track('interview_limit_hit', { tier: 'free', userId });

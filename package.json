@@ -12,17 +12,17 @@
     "@ai-sdk/openai": "^3.0.52",
     "@clerk/nextjs": "^6.25.4",
     "@react-pdf/renderer": "^4.5.1",
-    "@types/pdf-parse": "^1.1.5",
-    "@vapi-ai/web": "^2.5.2",
+    "@upstash/redis": "^1.38.4",
+    "@vapi-ai/web": "^2.7.0",
     "ai": "^6.0.153",
     "clsx": "^2.1.1",
     "mammoth": "^1.12.0",
     "next": "15.4.10",
-    "pdf-parse": "^1.1.1",
     "posthog-js": "^1.379.1",
     "react": "19.1.0",
     "react-dom": "19.1.0",
-    "tailwind-merge": "^3.4.0"
+    "tailwind-merge": "^3.4.0",
+    "unpdf": "^1.8.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

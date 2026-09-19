@@ -63,7 +63,7 @@ export async function POST(req: Request) {
     req.headers.get('x-real-ip') ??
     'unknown';
 
-  const { allowed } = checkRateLimit(ip);
+  const { allowed } = await checkRateLimit(ip);
   if (!allowed) {
     return NextResponse.json(
       { error: "You've used your 3 free analyses today. Sign up free to get unlimited access." },
@@ -110,9 +110,15 @@ export async function POST(req: Request) {
     if (name.endsWith('.pdf')) {
       try {
         finalCvText = await extractTextFromPDF(buffer);
-      } catch {
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : '';
+        const isScanned = msg.includes('scanned image');
         return NextResponse.json(
-          { error: 'Could not read your PDF. Try pasting your CV text instead.' },
+          {
+            error: isScanned
+              ? 'Your PDF appears to be a scanned image. Please paste your CV text or upload a text-based PDF (exported from Word, Google Docs, or similar).'
+              : 'Could not read your PDF. Try pasting your CV text instead, or upload a different PDF file.',
+          },
           { status: 400 }
         );
       }

@@ -8,7 +8,6 @@ import { useAuth } from '@clerk/nextjs';
 import { track } from '@/lib/track';
 import type { TailoredCvData } from '@/components/pdf/TailoredCvDocument';
 import { TAILORED_CV_MONTHLY_LIMIT } from '@/lib/rate-limit';
-import { SUBMISSION_KEY } from '@/lib/submission-key';
 
 const PdfDownloader = dynamic(() => import('@/components/pdf/PdfDownloader'), {
   ssr: false,
@@ -22,7 +21,6 @@ const PdfDownloader = dynamic(() => import('@/components/pdf/PdfDownloader'), {
   ),
 });
 
-const TTL_MS = 60 * 60 * 1000;
 
 const LOADING_MESSAGES = [
   'Reading your CV...',
@@ -86,17 +84,19 @@ export default function TailoredCvPage() {
   }, [status]);
 
   const loadAndGenerate = useCallback(async () => {
-    let submission: { cvText: string; jobDescription: string; submittedAt: number } | null = null;
+    // Submission is stored in Redis; read via the server endpoint then consume
+    // (this is the last consumer — consume deletes from Redis and clears the cookie).
+    let submission: { cvText: string; jobDescription: string } | null = null;
     try {
-      const raw = sessionStorage.getItem(SUBMISSION_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Date.now() - parsed.submittedAt < TTL_MS) {
-          submission = parsed;
-        }
+      const res = await fetch('/api/try/read-submission');
+      if (!res.ok) {
+        setStatus('orphaned');
+        return;
       }
+      submission = await res.json();
     } catch {
-      // sessionStorage unavailable
+      setStatus('orphaned');
+      return;
     }
 
     if (!submission?.cvText || !submission?.jobDescription) {
@@ -165,6 +165,8 @@ export default function TailoredCvPage() {
     setEditSummary(data.summary ?? '');
     setEditBullets((data.experience ?? []).map((j) => [...(j.bullets ?? [])]));
 
+    // Last consumer — delete from Redis and clear the cookie.
+    fetch('/api/try/consume-submission', { method: 'POST' }).catch(() => {});
     setStatus('ready');
   }, []);
 

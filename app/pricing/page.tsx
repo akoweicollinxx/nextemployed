@@ -1,10 +1,10 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useAuth, useClerk } from '@clerk/nextjs';
+import { useAuth, useClerk, useUser } from '@clerk/nextjs';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import { track } from '@/lib/track';
+import { PRO_PLAN_SLUG } from '@/lib/plans';
 
 const FREE_FEATURES = [
   'CV analysis and rewrites',
@@ -49,48 +49,48 @@ function CheckIcon() {
 
 export default function PricingPage() {
   const { isSignedIn, isLoaded, has } = useAuth();
+  const { user } = useUser();
   const clerk = useClerk();
-  const router = useRouter();
-  const [checkoutLoading, setCheckoutLoading] = useState(false);
   const [faqOpen, setFaqOpen] = useState<number | null>(null);
 
   const planId = process.env.NEXT_PUBLIC_CLERK_PRO_PLAN_ID ?? '';
-  const isPro = isLoaded && isSignedIn && planId
-    ? has({ plan: `user:${planId}` as `user:${string}` })
+  // has() reads the JWT pla claim — pass the slug, not the ID (see lib/plans.ts).
+  const isPro = isLoaded && isSignedIn
+    ? has({ plan: PRO_PLAN_SLUG })
     : false;
 
   useEffect(() => {
     track('pricing_page_viewed', { is_signed_in: isSignedIn ?? false, is_pro: isPro });
   }, [isSignedIn, isPro]);
 
-  async function handleUpgrade(source: 'pricing_page_pro_card' | 'pricing_page_free_card') {
-    track('pricing_upgrade_clicked', { source });
-
-    if (!isSignedIn) {
-      router.push('/sign-up?redirect_url=/pricing');
-      return;
-    }
-
+  function handleUpgrade() {
     if (!planId) {
       console.error('[Billing] NEXT_PUBLIC_CLERK_PRO_PLAN_ID is not set.');
       return;
     }
-
-    setCheckoutLoading(true);
+    track('pricing_upgrade_clicked', { source: 'pricing_page_pro_card' });
     track('pricing_checkout_started', { plan_id: planId });
-
-    try {
-      await clerk.billing.startCheckout({
-        planId,
-        planPeriod: 'month',
-      });
-      track('pricing_checkout_completed', { plan_id: planId });
-    } catch (err) {
-      console.error('[Billing] Checkout error:', err);
-      track('pricing_checkout_abandoned', { plan_id: planId });
-    } finally {
-      setCheckoutLoading(false);
-    }
+    // __internal_openCheckout opens Clerk's checkout drawer synchronously.
+    // onSubscriptionComplete fires when Stripe confirms the payment.
+    clerk.__internal_openCheckout({
+      planId,
+      planPeriod: 'month',
+      onSubscriptionComplete: async () => {
+        track('pricing_checkout_completed', { plan_id: planId });
+        try {
+          // Rely on the verified Clerk webhook to grant entitlement, then refresh.
+          for (let i = 0; i < 6; i++) {
+            await user?.reload();
+            const grantedAt = user?.publicMetadata?.proGrantedAt;
+            if (typeof grantedAt === 'number') break;
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+          await clerk.session?.touch();
+        } catch (err) {
+          console.error('[Billing] Failed to refresh user after checkout:', err);
+        }
+      },
+    });
   }
 
   return (
@@ -133,7 +133,7 @@ export default function PricingPage() {
             <div className="mb-6">
               <p className="text-sm font-medium text-gray-500 uppercase tracking-widest mb-3">Free</p>
               <div className="flex items-end gap-1.5 mb-1">
-                <span className="text-5xl font-bold">£0</span>
+                <span className="text-5xl font-bold">$0</span>
                 <span className="text-gray-500 mb-2">/month</span>
               </div>
               <p className="text-gray-400 text-sm mt-3 leading-relaxed">
@@ -180,10 +180,11 @@ export default function PricingPage() {
                   </span>
                 </div>
                 <div className="flex items-end gap-1.5 mb-1">
-                  <span className="text-5xl font-bold bg-gradient-to-r from-purple-300 to-cyan-300 bg-clip-text text-transparent">£12.99</span>
+                  <span className="text-5xl font-bold bg-gradient-to-r from-purple-300 to-cyan-300 bg-clip-text text-transparent">$9.99</span>
                   <span className="text-gray-500 mb-2">/month</span>
                 </div>
                 <p className="text-xs text-gray-600 mt-1">Cancel anytime</p>
+                <p className="text-xs text-gray-700 mt-1">Billed in USD. Your bank may apply currency conversion.</p>
                 <p className="text-gray-400 text-sm mt-3 leading-relaxed">
                   Practice as much as you want.
                 </p>
@@ -216,18 +217,10 @@ export default function PricingPage() {
                 </Link>
               ) : (
                 <button
-                  onClick={() => handleUpgrade('pricing_page_pro_card')}
-                  disabled={checkoutLoading}
-                  className="w-full py-3 rounded-full bg-gradient-to-r from-purple-600 to-cyan-600 text-sm font-bold text-white hover:shadow-[0_0_30px_rgba(147,51,234,0.3)] hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
+                  onClick={handleUpgrade}
+                  className="w-full py-3 rounded-full bg-gradient-to-r from-purple-600 to-cyan-600 text-sm font-bold text-white hover:shadow-[0_0_30px_rgba(147,51,234,0.3)] hover:scale-[1.02] active:scale-95 transition-all"
                 >
-                  {checkoutLoading ? (
-                    <span className="flex items-center justify-center gap-2">
-                      <span className="w-3.5 h-3.5 rounded-full border-2 border-white border-t-transparent animate-spin" />
-                      Opening checkout…
-                    </span>
-                  ) : (
-                    'Upgrade to Pro'
-                  )}
+                  Upgrade to Pro
                 </button>
               )}
             </div>

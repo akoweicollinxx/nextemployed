@@ -1,15 +1,13 @@
-/**
- * Extracts text content from a PDF buffer.
- * @param buffer - The PDF file as a buffer.
- * @returns Extracted text
- */
+import { extractText, getDocumentProxy } from 'unpdf';
+
 export async function extractTextFromPDF(buffer: Buffer): Promise<string> {
-  const pdf = require('pdf-parse/lib/pdf-parse.js');
-  try {
-    const data = await pdf(buffer);
-    return data.text;
-  } catch (error) {
-    console.error('Error parsing PDF:', error);
-    throw new Error('Failed to extract text from PDF.');
+  const uint8 = new Uint8Array(buffer);
+  const pdf = await getDocumentProxy(uint8);
+  const { text } = await extractText(pdf, { mergePages: true });
+
+  if (!text || text.trim().length < 20) {
+    throw new Error('PDF appears to have no extractable text — may be a scanned image');
   }
+
+  return text;
 }

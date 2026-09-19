@@ -7,9 +7,6 @@ import { useAuth } from '@clerk/nextjs';
 import { track } from '@/lib/track';
 import { AnalysisResult } from '@/components/analysis/AnalysisResult';
 import { LoadingState } from '@/components/analysis/LoadingState';
-import { SUBMISSION_KEY } from '@/lib/submission-key';
-const TTL_MS = 60 * 60 * 1000; // 1 hour
-
 type Submission = {
   cvText: string;
   jobDescription: string;
@@ -39,20 +36,30 @@ export default function TryResultsPage() {
     if (hasStarted.current) return;
     hasStarted.current = true;
 
+    // Submission is stored server-side in Redis; the cookie carries the ID.
+    // Fetch it from the read endpoint (requires Clerk auth, which we have at this point).
+    void (async () => {
     let submission: Submission | null = null;
     try {
-      const raw = sessionStorage.getItem(SUBMISSION_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as Submission;
-        if (Date.now() - parsed.submittedAt < TTL_MS) {
-          submission = parsed;
-        }
+      const res = await fetch('/api/try/read-submission');
+      if (res.status === 404) {
+        setStatus('orphaned');
+        track('try_results_orphaned');
+        return;
       }
+      if (!res.ok) {
+        setError('Something went wrong loading your analysis. Please try again.');
+        setStatus('error');
+        return;
+      }
+      submission = await res.json() as Submission;
     } catch {
-      // sessionStorage unavailable
+      setError('Network error. Check your connection and try again.');
+      setStatus('error');
+      return;
     }
 
-    if (!submission || !submission.cvText || !submission.jobDescription) {
+    if (!submission?.cvText || !submission?.jobDescription) {
       setStatus('orphaned');
       track('try_results_orphaned');
       return;
@@ -61,6 +68,7 @@ export default function TryResultsPage() {
     setTeaserResult(submission.teaserResult ?? '');
     track('try_results_page_viewed');
     runFullAnalysis(submission);
+    })();
   }, [isLoaded, isSignedIn, router]);
 
   useEffect(() => {
@@ -109,8 +117,8 @@ export default function TryResultsPage() {
     }
 
     setStatus('done');
-    // Keep submission in sessionStorage — /try/tailored-cv needs it.
-    // It expires via the 1-hour TTL checked on every read.
+    // Submission stays in Redis — /try/tailored-cv is the next consumer and
+    // calls /api/try/consume-submission to delete it after rendering.
     track('try_results_completed');
   }
 

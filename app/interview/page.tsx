@@ -2,11 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useUser } from '@clerk/nextjs';
+import { useUser, useClerk } from '@clerk/nextjs';
 import Link from 'next/link';
 import vapi from '@/lib/vapi';
 import { track } from '@/lib/track';
-import { SUBMISSION_KEY } from '@/lib/submission-key';
 import type { InterviewLimitResponse } from '@/app/api/interview/check-limit/route';
 
 // TODO: Drop final portrait at /public/interviewers/sarah-chen.jpg
@@ -158,7 +157,9 @@ function JdModal({
 // ---------------------------------------------------------------------------
 export default function InterviewPage() {
   const { user } = useUser();
+  const clerk = useClerk();
   const router = useRouter();
+  const planId = process.env.NEXT_PUBLIC_CLERK_PRO_PLAN_ID ?? '';
 
   const displayName = getUserDisplayName(user);
   const fullName = getFullUserName(user);
@@ -178,18 +179,29 @@ export default function InterviewPage() {
   const [contextLoading, setContextLoading] = useState(false);
   const [showJdModal, setShowJdModal] = useState(false);
   const [limitBlocked, setLimitBlocked] = useState(false);
+  const [justUpgraded, setJustUpgraded] = useState(false);
+  const [jdParseError, setJdParseError] = useState<string | null>(null);
 
   const transcriptEndRef = useRef<HTMLDivElement>(null);
+  // Ref so Vapi event handlers (registered inside a useEffect closure) can always
+  // read the latest jdContext without re-running the effect.
+  const jdContextRef = useRef<JdContext | null>(null);
+  useEffect(() => { jdContextRef.current = jdContext; }, [jdContext]);
 
   // Parse JD text → { role, company }, cache result, update state
   const parseAndCacheContext = useCallback(async (jdText: string): Promise<JdContext | null> => {
     setContextLoading(true);
+    setJdParseError(null);
     try {
       const res = await fetch('/api/parse-jd-context', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jdText }),
       });
+      if (res.status === 429) {
+        setJdParseError("You've hit today's JD parsing limit. Upgrade to Pro for unlimited.");
+        return null;
+      }
       if (!res.ok) return null;
       const data = await res.json();
       const ctx: JdContext = {
@@ -234,18 +246,16 @@ export default function InterviewPage() {
       }
     } catch {}
 
-    // 2. If no cache, try to parse from the /try submission JD
+    // 2. If no cache, try to parse the JD from the /try submission (server-side)
     if (!contextPresent) {
-      try {
-        const sub = sessionStorage.getItem(SUBMISSION_KEY);
-        if (sub) {
-          const { jobDescription } = JSON.parse(sub) as { jobDescription?: string };
-          if (jobDescription) {
-            // Async — fires track('interview_jd_context_parsed') internally
-            parseAndCacheContext(jobDescription);
+      fetch('/api/try/read-submission')
+        .then(r => r.ok ? r.json() : null)
+        .then((sub: { jobDescription?: string } | null) => {
+          if (sub?.jobDescription) {
+            parseAndCacheContext(sub.jobDescription);
           }
-        }
-      } catch {}
+        })
+        .catch(() => {});
     }
 
     track('interview_page_viewed', { context_present: contextPresent });
@@ -255,10 +265,27 @@ export default function InterviewPage() {
       setIsCalling(true);
       setVapiConnecting(false);
       setCallEverStarted(true);
+      // Consume the weekly slot only now that the call has actually connected.
+      fetch('/api/interview/record-usage', { method: 'POST' }).catch(() => {});
     };
     const handleCallEnd = () => {
       setIsCalling(false);
       setIsSpeaking(false);
+      // Persist per-user interview memory so the next session can personalise the AI.
+      const uid = clerk.user?.id;
+      if (uid) {
+        try {
+          const key = `nextemployed_memory_${uid}`;
+          const prev = JSON.parse(localStorage.getItem(key) || '{}');
+          const ctx = jdContextRef.current;
+          localStorage.setItem(key, JSON.stringify({
+            totalInterviews: (prev.totalInterviews ?? 0) + 1,
+            lastInterviewDate: new Date().toISOString().split('T')[0],
+            lastRole: ctx?.role ?? prev.lastRole ?? null,
+            lastCompany: ctx?.company ?? prev.lastCompany ?? null,
+          }));
+        } catch {}
+      }
     };
     const handleSpeechStart = () => setIsSpeaking(true);
     const handleSpeechEnd = () => setIsSpeaking(false);
@@ -279,6 +306,13 @@ export default function InterviewPage() {
       }
     };
     const handleError = (err: unknown) => {
+      const isEmpty = err == null || (typeof err === 'object' && Object.keys(err as object).length === 0);
+      const msg = err instanceof Error ? err.message : (typeof err === 'string' ? err : '');
+      // Fires when the AI hangs up cleanly; call-end already handles UI state.
+      const isNormalEnd = msg.includes('ejection') || msg.includes('Meeting has ended');
+
+      if (isEmpty || isNormalEnd) return;
+
       console.error('Vapi error:', err);
       setVapiConnecting(false);
       setVapiError("Couldn't connect to the interviewer. Please try again.");
@@ -315,6 +349,7 @@ export default function InterviewPage() {
     }
     setVapiError(null);
     setVapiConnecting(true);
+    let reservedFreeSlot = false;
 
     // Belt-and-braces: check server-side tier limit before spending any Vapi budget.
     try {
@@ -331,16 +366,59 @@ export default function InterviewPage() {
         track('interview_limit_hit', { source: 'interview_page' });
         return;
       }
+      reservedFreeSlot = limitData.tier === 'free';
     } catch {
       setVapiConnecting(false);
       setVapiError("Couldn't verify your interview limit. Please try again.");
       return;
     }
 
+    // Ensure the browser has mic access before spending any Vapi budget.
+    // Without this, Vapi starts the WebRTC handshake, times out waiting for an audio
+    // device (permission prompt not yet answered), and ejects the call immediately.
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach(t => t.stop()); // Release immediately; Vapi manages its own stream
+    } catch {
+      if (reservedFreeSlot) {
+        fetch('/api/interview/release-usage', { method: 'POST' }).catch(() => {});
+      }
+      setVapiConnecting(false);
+      setVapiError('Microphone access is required for the interview. Please allow microphone access in your browser and try again.');
+      return;
+    }
+
+    // Load per-user memory so the Vapi workflow can personalise the session.
+    // The workflow should reference {{memoryContext}} in its system prompt.
+    // Key: nextemployed_memory_<clerkUserId> — unique per user, persists across sessions.
+    let memoryContext = '';
+    let interviewNumber = 1;
+    try {
+      const memUserId = clerk.user?.id;
+      if (memUserId) {
+        const memKey = `nextemployed_memory_${memUserId}`;
+        const mem = JSON.parse(localStorage.getItem(memKey) || '{}') as {
+          totalInterviews?: number;
+          lastInterviewDate?: string;
+          lastRole?: string | null;
+          lastCompany?: string | null;
+        };
+        if (mem.totalInterviews) {
+          interviewNumber = mem.totalInterviews + 1;
+          const parts = [`Session #${interviewNumber} for this user.`];
+          if (mem.lastRole) parts.push(`Previously practised for: ${mem.lastRole} role`);
+          if (mem.lastCompany) parts.push(`at ${mem.lastCompany}`);
+          if (mem.lastInterviewDate) parts.push(`(last session: ${mem.lastInterviewDate})`);
+          memoryContext = parts.join(' ');
+        }
+      }
+    } catch {}
+
     track('interview_started', {
       role: jdContext?.role ?? null,
       company: jdContext?.company ?? null,
       context_present: !!jdContext,
+      interview_number: interviewNumber,
     });
     try {
       // variableValues keys must match the {{placeholder}} names in the
@@ -350,7 +428,7 @@ export default function InterviewPage() {
       await vapi.start(process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID!, {
         variableValues: {
           username: displayName,
-          userid: userEmail,
+          userid: user?.id || userEmail,
           firstName: user?.firstName || displayName.split(' ')[0],
           lastName: user?.lastName || '',
           fullName,
@@ -358,25 +436,62 @@ export default function InterviewPage() {
           userEmail,
           role: jdContext?.role || '',
           company: jdContext?.company || '',
+          memoryContext,
+          interviewNumber: String(interviewNumber),
         },
       });
     } catch (err) {
       console.error('Failed to start Vapi call:', err);
+      if (reservedFreeSlot) {
+        fetch('/api/interview/release-usage', { method: 'POST' }).catch(() => {});
+      }
       setVapiConnecting(false);
       setVapiError("Couldn't connect to the interviewer. Please try again.");
     }
   };
 
+  const handleUpgradeFromWall = () => {
+    if (!planId) return;
+    track('pricing_upgrade_clicked', { source: 'interview_limit_hit' });
+    track('pricing_checkout_started', { plan_id: planId, source: 'interview_limit_wall' });
+
+    let subscriptionCompleted = false;
+
+    // Dismiss the wall first so the checkout drawer isn't covered by the overlay.
+    setLimitBlocked(false);
+
+    clerk.__internal_openCheckout({
+      planId,
+      planPeriod: 'month',
+      onSubscriptionComplete: async () => {
+        subscriptionCompleted = true;
+        track('pricing_checkout_completed', { plan_id: planId, source: 'interview_limit_wall' });
+        try {
+          // Wait briefly for the verified subscription webhook to update metadata,
+          // then refresh Clerk user/session claims.
+          for (let i = 0; i < 6; i++) {
+            await user?.reload();
+            const grantedAt = user?.publicMetadata?.proGrantedAt;
+            if (typeof grantedAt === 'number') break;
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+          await clerk.session?.touch();
+        } catch (err) {
+          console.error('[interview] Failed to confirm upgrade:', err);
+        }
+        setJustUpgraded(true);
+        setTimeout(() => setJustUpgraded(false), 5000);
+      },
+      onClose: () => {
+        // Restore the wall if the user closed checkout without paying.
+        if (!subscriptionCompleted) {
+          setLimitBlocked(true);
+        }
+      },
+    });
+  };
+
   const handleSaveJd = async (jdText: string) => {
-    // Persist the new JD text so other pages (/try/results, etc.) can use it
-    try {
-      const existingRaw = sessionStorage.getItem(SUBMISSION_KEY);
-      const existing = existingRaw ? JSON.parse(existingRaw) : {};
-      sessionStorage.setItem(
-        SUBMISSION_KEY,
-        JSON.stringify({ ...existing, jobDescription: jdText, submittedAt: existing.submittedAt || Date.now() })
-      );
-    } catch {}
     // Bust the context cache so it re-parses with the new text
     try { sessionStorage.removeItem(JD_CONTEXT_KEY); } catch {}
 
@@ -468,6 +583,27 @@ export default function InterviewPage() {
           </span>
         </div>
       </nav>
+
+      {/* ── JD parse rate-limit toast ───────────────────────────── */}
+      {jdParseError && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl bg-yellow-900/90 border border-yellow-500/40 backdrop-blur-sm shadow-2xl text-sm font-medium text-yellow-200 flex items-center gap-2.5 animate-fade-in max-w-sm text-center">
+          <svg className="w-4 h-4 text-yellow-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z" />
+          </svg>
+          <span>{jdParseError}</span>
+          <button onClick={() => setJdParseError(null)} className="ml-1 text-yellow-400 hover:text-white shrink-0" aria-label="Dismiss">✕</button>
+        </div>
+      )}
+
+      {/* ── Pro upgrade success toast ────────────────────────────── */}
+      {justUpgraded && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl bg-gradient-to-r from-purple-900/90 to-cyan-900/90 border border-purple-500/40 backdrop-blur-sm shadow-2xl text-sm font-medium text-white flex items-center gap-2.5 animate-fade-in">
+          <svg className="w-4 h-4 text-purple-300 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+          </svg>
+          You&apos;re now Pro. Enjoy unlimited practice.
+        </div>
+      )}
 
       {/* ── Interview room ───────────────────────────────────────── */}
       <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 z-10 w-full max-w-lg mx-auto">
@@ -668,19 +804,24 @@ export default function InterviewPage() {
             </div>
 
             <div className="flex flex-col gap-3 pt-1">
-              <Link
-                href="/pricing"
-                onClick={() => track('pricing_upgrade_clicked', { source: 'interview_limit_hit' })}
+              <button
+                onClick={handleUpgradeFromWall}
                 className="inline-flex items-center justify-center px-6 py-3 rounded-full bg-gradient-to-r from-purple-600 to-cyan-600 text-white font-semibold text-sm hover:shadow-[0_0_30px_rgba(147,51,234,0.3)] hover:scale-105 active:scale-95 transition-all"
               >
-                Upgrade to Pro — £12.99/month
-              </Link>
+                Upgrade to Pro — $9.99/month
+              </button>
               <button
                 onClick={() => router.push('/')}
                 className="text-gray-500 text-sm hover:text-gray-300 transition-colors"
               >
                 Back to dashboard
               </button>
+              <Link
+                href="/pricing"
+                className="text-gray-600 text-xs hover:text-gray-500 transition-colors"
+              >
+                See full pricing details
+              </Link>
             </div>
           </div>
         </div>
