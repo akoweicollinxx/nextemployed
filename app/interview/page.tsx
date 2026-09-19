@@ -188,6 +188,11 @@ export default function InterviewPage() {
   const jdContextRef = useRef<JdContext | null>(null);
   useEffect(() => { jdContextRef.current = jdContext; }, [jdContext]);
 
+  // Shared across handleStartInterview and the Vapi event handlers (different closure scopes).
+  // true = free-tier slot reserved but not yet confirmed by call-start.
+  // Cleared to false on confirmation (call-start) or release (any failure path).
+  const reservedFreeSlotRef = useRef(false);
+
   // Parse JD text → { role, company }, cache result, update state
   const parseAndCacheContext = useCallback(async (jdText: string): Promise<JdContext | null> => {
     setContextLoading(true);
@@ -265,8 +270,12 @@ export default function InterviewPage() {
       setIsCalling(true);
       setVapiConnecting(false);
       setCallEverStarted(true);
-      // Consume the weekly slot only now that the call has actually connected.
-      fetch('/api/interview/record-usage', { method: 'POST' }).catch(() => {});
+      // Confirm the weekly slot now that the call has actually connected.
+      // Clear the ref first so a concurrent error event can't double-release.
+      reservedFreeSlotRef.current = false;
+      fetch('/api/interview/record-usage', { method: 'POST' })
+        .then(r => { if (r.ok) track('interview_reservation_recorded', {}); })
+        .catch(() => {});
     };
     const handleCallEnd = () => {
       setIsCalling(false);
@@ -312,6 +321,15 @@ export default function InterviewPage() {
       const isNormalEnd = msg.includes('ejection') || msg.includes('Meeting has ended');
 
       if (isEmpty || isNormalEnd) return;
+
+      // Release the reserved free-tier slot so the user can retry without hitting the wall.
+      // Guards against double-release if vapi.start() also throws after emitting this event.
+      if (reservedFreeSlotRef.current) {
+        reservedFreeSlotRef.current = false;
+        fetch('/api/interview/release-usage', { method: 'POST' })
+          .then(r => { if (r.ok) track('interview_reservation_released', { reason: 'vapi_error' }); })
+          .catch(() => {});
+      }
 
       console.error('Vapi error:', err);
       setVapiConnecting(false);
@@ -367,6 +385,7 @@ export default function InterviewPage() {
         return;
       }
       reservedFreeSlot = limitData.tier === 'free';
+      reservedFreeSlotRef.current = reservedFreeSlot;
     } catch {
       setVapiConnecting(false);
       setVapiError("Couldn't verify your interview limit. Please try again.");
@@ -381,7 +400,10 @@ export default function InterviewPage() {
       stream.getTracks().forEach(t => t.stop()); // Release immediately; Vapi manages its own stream
     } catch {
       if (reservedFreeSlot) {
-        fetch('/api/interview/release-usage', { method: 'POST' }).catch(() => {});
+        reservedFreeSlotRef.current = false;
+        fetch('/api/interview/release-usage', { method: 'POST' })
+          .then(r => { if (r.ok) track('interview_reservation_released', { reason: 'mic_denied' }); })
+          .catch(() => {});
       }
       setVapiConnecting(false);
       setVapiError('Microphone access is required for the interview. Please allow microphone access in your browser and try again.');
@@ -442,8 +464,11 @@ export default function InterviewPage() {
       });
     } catch (err) {
       console.error('Failed to start Vapi call:', err);
-      if (reservedFreeSlot) {
-        fetch('/api/interview/release-usage', { method: 'POST' }).catch(() => {});
+      if (reservedFreeSlot && reservedFreeSlotRef.current) {
+        reservedFreeSlotRef.current = false;
+        fetch('/api/interview/release-usage', { method: 'POST' })
+          .then(r => { if (r.ok) track('interview_reservation_released', { reason: 'start_throw' }); })
+          .catch(() => {});
       }
       setVapiConnecting(false);
       setVapiError("Couldn't connect to the interviewer. Please try again.");
